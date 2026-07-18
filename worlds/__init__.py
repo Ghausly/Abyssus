@@ -1,252 +1,129 @@
-import importlib
-import importlib.abc
-import importlib.machinery
+# This is where your imports go. That means any functions or variables that you want to use here but exist in another file
+# What I have here is just some of the basic Archipelago classes that are widely used
+
+# A more indepth explanation of the types of imports
+# THE LINES FROM 7-12 ARE EXAMPLE IMPORTS AND NOT NECESSARILY REQUIRED
+
+# import random
+# With that import you are importing every single function, class, variable, whatever else that is allowed to be imported from random. Super useful and simple but somewhat bulky
+
+# from random import randrange
+# Here you are only grabbing the randrange function from random. This is less bulky but you need to put exactly what you want from that file/library
+# If you want more things from the import add a comma like the worlds.AutoWorld import below
 import logging
-import os
-import sys
-import zipimport
-import time
-import dataclasses
-import json
-from pathlib import Path
-from types import ModuleType
-from typing import List, Sequence
-from zipfile import ZipFile, BadZipFile
 
-from NetUtils import DataPackage
-from Utils import local_path, user_path, Version, version_tuple, tuplize_version, messagebox
+from BaseClasses import MultiWorld, Item, Tutorial
+from worlds.AutoWorld import World, CollectionState, WebWorld
+from typing import Dict
 
-local_folder = os.path.dirname(__file__)
-user_folder = user_path("worlds") if user_path() != local_path() else user_path("custom_worlds")
-try:
-    os.makedirs(user_folder, exist_ok=True)
-except OSError:  # can't access/write?
-    user_folder = None
+from .Locations import get_location_names, get_total_locations
+from .Items import create_item, create_itempool, item_table
+from .Options import APSkeletonOptions
+from .Regions import create_regions
+from .Types import ChapterType, chapter_type_to_name
 
-__all__ = [
-    "network_data_package",
-    "AutoWorldRegister",
-    "world_sources",
-    "local_folder",
-    "user_folder",
-    "failed_world_loads",
-]
+# This is where you setup the page on the site!
+# Typically is the name of your game with web
+# Whatever you named the folder you are holding all of this in
+class APSkeletonWeb(WebWorld):
+    # Theres a few different themes so have fun with it
+    theme = "Party"
+    
+    # You shouldnt have to change much here except the name at the bottom!
+    tutorials = [Tutorial(
+        "Multiworld Setup Guide",
+        "A guide to setting up (the game you are randomizing) for Archipelago. "
+        "This guide covers single-player, multiworld, and related software.",
+        "English",
+        "setup_en.md",
+        "setup/en",
+        ["Nep (but you would put your name!)"]
+    )]
 
+# This class is the real meat and potatoes
+# Same as the first class its normally named whatever you named your folder with World at the end
+class APSkeletonWorld(World):
+    """
+    This is where you describe your game. Pretend you are marketing the game and that people have no clue what it is.
+    Or make it silly. Whatever you wish I have no control over you.
+    """
 
-failed_world_loads: dict[str, str] = {}
+    # You want to put the full name of the game here. If you shortened the name for the folder and class names, dont do that here
+    game = "APSkeleton"
+    # The item_table will be setup in  your Items.py. This line gets all the items you put into item_table and puts it in a way that AP can understand it
+    item_name_to_id = {name: data.ap_code for name, data in item_table.items()}
+    # get_location_names() will come from your Locations.py
+    location_name_to_id = get_location_names()
+    # And these 2 are the name of your Options.py class. 
+    options_dataclass = APSkeletonOptions
+    options = APSkeletonOptions
+    # The name of the class above
+    web = APSkeletonWeb()
+    # print("🐀🐀🐀🐀🐀🐀🐀🐀🐀🐀🐀🐀🐀🐀")
 
-logger = logging.getLogger("Worlds")
-logger.propagate = False
-logger.setLevel(logging.INFO)
+    # There are other built in variables for AP. You can look at other worlds to see your options
+    # Like PLEASE look at the various worlds. Its so helpful. Find one you like and you can duplicate a bunch of it
 
-@dataclasses.dataclass(order=True)
-class WorldSource:
-    path: str  # typically relative path from this module
-    is_zip: bool = False
-    relative: bool = True  # relative to regular world import folder
-    time_taken: float = -1.0
-    version: Version = Version(0, 0, 0)
+    # This is where you put stuff that need to be done RIGHT away. Typically you can just leave it alone but it can be useful to pop some things here as needed
+    def __init__(self, multiworld: "MultiWorld", player: int):
+        super().__init__(multiworld, player)
 
-    def __repr__(self) -> str:
-        return f"{self.__class__.__name__}({self.path}, is_zip={self.is_zip}, relative={self.relative})"
+    # Generate early you do things just before the generation
+    # Super important for doing things like adjusting the item pool based on options and the like
+    # Can technically be skipped if you dont need to do anything or if you handle it elsewhere like a short hike
+    def generate_early(self):
+        # I highly recommend looking at other apworlds init files to see some examples
+        # sly1 (hey i did that), ahit, and bomb rush cyberfunk are some good ones
+        starting_chapter = chapter_type_to_name[ChapterType(self.options.StartingChapter)]
 
-    @property
-    def resolved_path(self) -> str:
-        if self.relative:
-            return os.path.join(local_folder, self.path)
-        return self.path
+        # Push precollected is how you give your player items they need to start with
+        # This is for options though. Dont worry about the starting inventory option thats in all yamls
+        # AP handles that one
+        self.multiworld.push_precollected(self.create_item(starting_chapter))
 
-    def load(self) -> bool:
-        try:
-            start = time.perf_counter()
-            importlib.import_module(f".{self.name}", "worlds")
-            self.time_taken = time.perf_counter()-start
-            return True
+    # Regions are the different locations in your world. So like Undead Burgh in dark souls or Pacifilog Town in pokemon
+    # They dont have to match your game, they can be whatever you need them to be for organization
+    def create_regions(self):
+        # This function comes from your Regions.py and dont worry that it matches the function that its in
+        create_regions(self)
 
-        except Exception:
-            # A single world failing can still mean enough is working for the user, log and carry on
-            import traceback
-            import io
-            file_like = io.StringIO()
-            print(f"Could not load world {self}:", file=file_like)
-            traceback.print_exc(file=file_like)
-            file_like.seek(0)
-            reason = file_like.read()
-            logging.exception(reason)
-            failed_world_loads[os.path.basename(self.path).rsplit(".", 1)[0]] = reason
-            return False
+        # You can also use this space to do other location creation activities
+        # Like if an option is enabled to add extra locations
+        # Or the opposite, whatever it is. Just be careful that you arent duplicating locations
 
-    @property
-    def name(self) -> str:
-        return Path(self.path).stem
+    # These are some examples of creating items. The create_itempool(self) function is coming from Items.py in this instance
+    # The important part is that the items get into the self.multiworld.itempool as a list of Items
+    # Ill try to explain better in the Items.py file 
+    def create_items(self):
+        self.multiworld.itempool += create_itempool(self)
 
-# AP_TEST_WORLDS (pytest only) scopes auto-loading to the named worlds; these are always loaded for the
-# suite's fixtures but aren't themselves worlds under test.
-_SUITE_FIXTURE_WORLDS = {"generic", "apquest"}
-_test_worlds_env = os.environ.get("AP_TEST_WORLDS") if "pytest" in sys.modules else None
-_requested_worlds = {name.strip() for name in _test_worlds_env.split(",") if name.strip()} if _test_worlds_env else None
-test_worlds_filter = _requested_worlds | _SUITE_FIXTURE_WORLDS if _requested_worlds else None
+    # This is just a helper function for turning names into Items. You could do some other stuff here as well
+    # ahit does similar if you want another look and bomb rush cyberfunk does it in a slightly different way by turning it into a specific item for that game
+    # Again hopefully I do a better job of explaining the Items.py file
+    def create_item(self, name: str) -> Item:
+        return create_item(self, name)
+    
+    # The slot data is what youre sending to the AP server kinda. You dont have to add all your options. Really you want the ones you think a pop tracker would use
+    # Seed, Slot, and TotalLocations are all super important for AP though, you need those
+    def fill_slot_data(self) -> Dict[str, object]:
+        slot_data: Dict[str, object] = {
+            "options": {
+                "StartingPlace":            self.options.StartingChapter.value,
+                "ExtraLocations":           self.options.ExtraLocations.value,
+                "TrapChance":               self.options.TrapChance.value,
+                "ForcefemTrapWeight":       self.options.ForcefemTrapWeight.value,
+                "SpeedChangeTrapWeight":    self.options.SpeedChangeTrapWeight.value
+            },
+            "Seed": self.multiworld.seed_name,  # to verify the server's multiworld
+            "Slot": self.multiworld.player_name[self.player],  # to connect to server
+            "TotalLocations": get_total_locations(self) # get_total_locations(self) comes from Locations.py
+        }
 
-# find potential world containers, currently folders and zip-importable .apworld's
-logger.info("Indexing worlds")
-world_sources: List[WorldSource] = []
-for folder in (folder for folder in (user_folder, local_folder) if folder):
-    relative = folder == local_folder
-    for entry in os.scandir(folder):
-        # prevent loading of __pycache__ and allow _* for non-world folders, disable files/folders starting with "."
-        if not entry.name.startswith(("_", ".")):
-            if test_worlds_filter is not None and Path(entry.name).stem not in test_worlds_filter:
-                continue
-            file_name = entry.name if relative else os.path.join(folder, entry.name)
-            if entry.is_dir():
-                if os.path.isfile(os.path.join(entry.path, '__init__.py')):
-                    world_sources.append(WorldSource(file_name, relative=relative))
-                elif os.path.isfile(os.path.join(entry.path, '__init__.pyc')):
-                    world_sources.append(WorldSource(file_name, relative=relative))
-                else:
-                    logging.warning(f"excluding {entry.name} from world sources because it has no __init__.py")
-            elif entry.is_file() and entry.name.endswith(".apworld"):
-                world_sources.append(WorldSource(file_name, is_zip=True, relative=relative))
-
-# import all submodules to trigger AutoWorldRegister
-logger.info("Processing found worlds")
-world_sources.sort()
-apworlds: list[WorldSource] = []
-for world_source in world_sources:
-    # load all loose files first:
-    if world_source.is_zip:
-        apworlds.append(world_source)
-    else:
-        logger.info(world_source.name)
-        world_source.load()
-
-from .AutoWorld import AutoWorldRegister
-
-for world_source in world_sources:
-    if not world_source.is_zip:
-        # look for manifest
-        manifest = {}
-        for dirpath, dirnames, filenames in os.walk(world_source.resolved_path):
-            for file in filenames:
-                if file.endswith("archipelago.json"):
-                    with open(os.path.join(dirpath, file), mode="r", encoding="utf-8") as manifest_file:
-                        manifest = json.load(manifest_file)
-                    break
-            if manifest:
-                break
-        game = manifest.get("game")
-        if game in AutoWorldRegister.world_types:
-            AutoWorldRegister.world_types[game].world_version = tuplize_version(manifest.get("world_version", "0.0.0"))
-            AutoWorldRegister.world_types[game].manifest = manifest
-
-if apworlds:
-    # encapsulation for namespace / gc purposes
-    def load_apworlds() -> None:
-        global apworlds
-        from .Files import APWorldContainer, InvalidDataError
-        core_compatible: list[tuple[WorldSource, APWorldContainer]] = []
-
-        def fail_world(game_name: str, reason: str, add_as_failed_to_load: bool = True) -> None:
-            if add_as_failed_to_load:
-                failed_world_loads[game_name] = reason
-            logging.warning(reason)
-
-        for apworld_source in apworlds:
-            logger.info(apworld_source.name)
-            apworld: APWorldContainer = APWorldContainer(apworld_source.resolved_path)
-            # populate metadata
-            try:
-                apworld.read()
-            except InvalidDataError as e:
-                if version_tuple < (0, 7, 0):
-                    logging.error(
-                        f"Invalid or missing manifest file for {apworld_source.resolved_path}. "
-                        "This apworld will stop working with Archipelago 0.7.0."
-                    )
-                    logging.error(e)
-                else:
-                    raise e
-            except BadZipFile as e:
-                err_message = (f"The world source {apworld_source.resolved_path} is not a valid zip. "
-                               "It is likely either corrupted, or was packaged incorrectly.")
-
-                if sys.stdout:
-                    raise RuntimeError(err_message) from e
-                else:
-                    messagebox("Couldn't load worlds", err_message, error=True)
-                    sys.exit(1)
-
-            if apworld.minimum_ap_version and apworld.minimum_ap_version > version_tuple:
-                fail_world(apworld.game,
-                           f"Did not load {apworld_source.path} "
-                           f"as its minimum core version {apworld.minimum_ap_version} "
-                           f"is higher than current core version {version_tuple}.")
-            elif apworld.maximum_ap_version and apworld.maximum_ap_version < version_tuple:
-                fail_world(apworld.game,
-                           f"Did not load {apworld_source.path} "
-                           f"as its maximum core version {apworld.maximum_ap_version} "
-                           f"is lower than current core version {version_tuple}.")
-            else:
-                core_compatible.append((apworld_source, apworld))
-        # load highest version first
-        core_compatible.sort(
-            key=lambda element: element[1].world_version if element[1].world_version else Version(0, 0, 0),
-            reverse=True)
-
-        apworld_module_specs = {}
-        class APWorldModuleFinder(importlib.abc.MetaPathFinder):
-            def find_spec(
-                    self, fullname: str, _path: Sequence[str] | None, _target: ModuleType = None
-            ) -> importlib.machinery.ModuleSpec | None:
-                return apworld_module_specs.get(fullname)
-
-        sys.meta_path.insert(0, APWorldModuleFinder())
-
-        for apworld_source, apworld in core_compatible:
-            if apworld.game and apworld.game in AutoWorldRegister.world_types:
-                fail_world(apworld.game,
-                           f"Did not load {apworld_source.path} "
-                           f"as its game {apworld.game} is already loaded.",
-                           add_as_failed_to_load=False)
-            else:
-                importer = zipimport.zipimporter(apworld_source.resolved_path)
-                world_name = Path(apworld.path).stem
-
-                spec = importer.find_spec(f"worlds.{world_name}")
-                apworld_module_specs[f"worlds.{world_name}"] = spec
-
-                apworld_source.load()
-                if apworld.game in AutoWorldRegister.world_types:
-                    # world could fail to load at this point
-                    if apworld.world_version:
-                        AutoWorldRegister.world_types[apworld.game].world_version = apworld.world_version
-
-                    assert apworld.path
-                    with ZipFile(apworld.path, "r") as zf:
-                        manifest = apworld.read_contents(zf)
-                    # version/compatible_version shouldn't be needed by world, makes it consistent with folder world
-                    manifest.pop("version", None)
-                    manifest.pop("compatible_version", None)
-                    AutoWorldRegister.world_types[apworld.game].manifest = manifest
-
-    load_apworlds()
-    del load_apworlds
-
-del apworlds
-
-# snapshot the worlds under test (a copy, so tests reassigning world_types can't leak in), dropping the
-# force-loaded fixtures unless they were explicitly requested.
-if _requested_worlds:
-    AutoWorldRegister.testable_worlds = {
-        game: world for game, world in AutoWorldRegister.world_types.items()
-        if Path(world.__file__).parent.name in _requested_worlds
-    }
-else:
-    AutoWorldRegister.testable_worlds = dict(AutoWorldRegister.world_types)
-
-# Build the data package for each game.
-logger.info("Datapackage")
-network_data_package: DataPackage = {
-    "games": {world_name: world.get_data_package_data() for world_name, world in AutoWorldRegister.world_types.items()},
-}
-
+        return slot_data
+    
+    # These are used by AP to add and remove items from the player. You can probably just leave them alone
+    def collect(self, state: "CollectionState", item: "Item") -> bool:
+        return super().collect(state, item)
+    
+    def remove(self, state: "CollectionState", item: "Item") -> bool:
+        return super().remove(state, item)
